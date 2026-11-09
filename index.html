@@ -1,0 +1,344 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>카드 두 장 만남 · WebAR</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #000;
+    font-family: -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo", "Malgun Gothic", sans-serif; }
+  #container { position: fixed; inset: 0; }
+  #start { position: fixed; inset: 0; z-index: 10; display: flex; flex-direction: column;
+    align-items: center; justify-content: center; gap: 12px; padding: 24px; text-align: center;
+    color: #fff; background: #111; }
+  #start h1 { margin: 0; font-size: 24px; }
+  #start p { margin: 0; color: #bbb; font-size: 15px; line-height: 1.5; }
+  #start button { margin-top: 8px; padding: 14px 32px; font-size: 17px; font-weight: 700;
+    color: #111; background: #ffd84d; border: 0; border-radius: 999px; }
+  #hud { position: fixed; left: 12px; top: 12px; z-index: 5; padding: 8px 12px;
+    color: #fff; background: rgba(0,0,0,.55); border-radius: 10px;
+    font-size: 13px; line-height: 1.6; white-space: pre; pointer-events: none; }
+  #hud[hidden] { display: none; }
+</style>
+
+<!-- three.js 0.160 고정: MindAR 1.2.5가 이 버전대 API를 사용함 -->
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/",
+    "mindar-image-three": "https://cdn.jsdelivr.net/npm/mind-ar@1.2.5/dist/mindar-image-three.prod.js"
+  }
+}
+</script>
+</head>
+<body>
+<div id="container"></div>
+
+<div id="start">
+  <h1>카드 두 장 만남</h1>
+  <p>카드 A와 B를 비추면 캐릭터가 나타나요.<br>두 카드를 가까이 붙이면 서로 인사합니다.</p>
+  <button id="startBtn">AR 시작</button>
+</div>
+<div id="hud" hidden></div>
+
+<script type="module">
+import * as THREE from 'three';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { MindARThree } from 'mindar-image-three';
+
+// ───────────────────────────────────────────────
+// 설정 — 수업에서는 이 부분만 바꾼다
+// ───────────────────────────────────────────────
+// 거리와 크기의 단위는 "카드 가로폭" (1 = 카드 한 장 폭)
+// → 명함이든 A4든 같은 숫자로 동작한다
+const CONFIG = {
+  targetSrc: './targets.mind',   // MindAR 컴파일러로 만든 파일. 이미지 순서 = index
+
+  cardA: { index: 0, model: './modelA.glb', color: 0x8ec5ff },
+  cardB: { index: 1, model: './modelB.glb', color: 0xffb3c7 },
+  // GLB가 없거나 경로가 틀리면 color의 기본 도형이 대신 나온다
+
+  modelHeight: 0.6,     // 캐릭터 키 = 카드 폭의 0.6배. 모델 원래 크기와 상관없이 자동 맞춤
+  modelYawOffset: 0,    // 모델이 엉뚱한 방향을 보면 Math.PI(180°) 또는 Math.PI/2(90°)
+
+  meetDistance: 1.3,    // 두 카드 중심 거리가 카드 폭의 1.3배 안 → 만남 (나란히 붙이면 약 1.0)
+  partMargin: 0.3,      // 헤어짐은 1.3 + 0.3 = 1.6배 밖으로 나가야 판정 (경계 깜빡임 방지)
+  turnSpeed: 8,         // 서로 바라보는 회전 속도
+
+  idleClip: 'Idle',     // GLB 애니메이션 이름 (없으면 첫 번째 클립을 기본 동작으로)
+  greetClip: 'Greet',   // 있으면 만남 때 재생, 없으면 통통 튀는 동작으로 대체
+
+  // 트래킹 안정화 (MindAR 내장 필터)
+  filterMinCF: 0.0001,  // 작을수록 떨림↓ (기본 0.001)
+  filterBeta: 0.001,    // 작을수록 떨림↓ 대신 반응 느려짐 (기본 1000)
+  missTolerance: 10,    // 몇 프레임 놓쳐야 사라졌다고 판단할지 (기본 5) → 깜빡임↓
+  warmupTolerance: 3,   // 몇 프레임 연속 인식돼야 나타날지 (기본 5) → 첫 인식 빨라짐
+};
+
+// ───────────────────────────────────────────────
+// MindAR 준비
+// ───────────────────────────────────────────────
+const mindarThree = new MindARThree({
+  container: document.querySelector('#container'),
+  imageTargetSrc: CONFIG.targetSrc,
+  maxTrack: 2,                         // 두 장 동시 추적
+  filterMinCF: CONFIG.filterMinCF,
+  filterBeta: CONFIG.filterBeta,
+  missTolerance: CONFIG.missTolerance,
+  warmupTolerance: CONFIG.warmupTolerance,
+});
+const { renderer, scene, camera } = mindarThree;
+
+scene.add(new THREE.HemisphereLight(0xffffff, 0x777777, 2.2));
+const sun = new THREE.DirectionalLight(0xffffff, 1.5);
+sun.position.set(0.5, 1, 1);
+scene.add(sun);
+
+const loader = new GLTFLoader();
+const hud = document.querySelector('#hud');
+
+// ───────────────────────────────────────────────
+// 카드 하나 = 앵커 + 캐릭터
+// 계층: anchor.group → stand(세우기) → yaw(방향) → hop(점프) → 모델
+// ───────────────────────────────────────────────
+function makeCard(cfg, label) {
+  const anchor = mindarThree.addAnchor(cfg.index);
+
+  // MindAR 앵커는 카드 면이 XY 평면, 카드에서 솟아오르는 방향이 +Z
+  // → X축으로 90° 돌려서 모델의 위(+Y)가 카드 밖을 향하게 세운다
+  const stand = new THREE.Group();
+  stand.rotation.x = Math.PI / 2;
+  anchor.group.add(stand);
+
+  const yaw = new THREE.Group();
+  const hop = new THREE.Group();
+  stand.add(yaw);
+  yaw.add(hop);
+
+  const card = { label, anchor, yaw, hop, visible: false, angle: 0,
+                 mixer: null, actions: {}, idle: null, hopTime: -1, fallback: false };
+
+  anchor.onTargetFound = () => { card.visible = true;  console.log(`[AR] ${label} 인식`); };
+  anchor.onTargetLost  = () => { card.visible = false; console.log(`[AR] ${label} 놓침`); };
+
+  loadModel(cfg, card);
+  return card;
+}
+
+async function loadModel(cfg, card) {
+  let obj;
+  try {
+    const gltf = await loader.loadAsync(cfg.model);
+    obj = gltf.scene;
+    if (gltf.animations.length) {
+      card.mixer = new THREE.AnimationMixer(obj);
+      gltf.animations.forEach(clip => card.actions[clip.name] = card.mixer.clipAction(clip));
+      // 평소 동작: Idle → 없으면 Greet가 아닌 첫 번째 클립 → 그것도 없으면 가만히
+      const idleClip = gltf.animations.find(c => c.name === CONFIG.idleClip)
+                    || gltf.animations.find(c => c.name !== CONFIG.greetClip);
+      card.idle = idleClip ? card.mixer.clipAction(idleClip) : null;
+      card.idle?.play();
+    }
+  } catch (e) {
+    console.warn(`[AR] ${cfg.model} 로드 실패 → 기본 도형 사용`, e);
+    card.fallback = true;
+    obj = makeFallback(cfg.color);
+  }
+  fitHeight(obj, CONFIG.modelHeight);
+  card.hop.add(obj);
+  card.yaw.rotation.y = CONFIG.modelYawOffset;
+}
+
+// 모델 원래 크기와 상관없이 키를 맞추고, 발바닥을 카드 위(y=0)에 놓는다
+// → Unity에서 겪은 Scale Factor 문제를 코드가 대신 처리
+function fitHeight(obj, height) {
+  obj.updateMatrixWorld(true);
+  const size = new THREE.Box3().setFromObject(obj).getSize(new THREE.Vector3());
+  obj.scale.multiplyScalar(height / (size.y || 1));
+  obj.updateMatrixWorld(true);
+  const box = new THREE.Box3().setFromObject(obj);
+  const center = box.getCenter(new THREE.Vector3());
+  obj.position.x -= center.x;
+  obj.position.z -= center.z;
+  obj.position.y -= box.min.y;
+}
+
+// GLB가 없을 때 쓰는 간단한 캐릭터 (몸통 + 눈 → 바라보는 방향이 보이게)
+function makeFallback(color) {
+  const g = new THREE.Group();
+  const body = new THREE.Mesh(new THREE.CapsuleGeometry(0.3, 0.35, 8, 24),
+                              new THREE.MeshStandardMaterial({ color, roughness: 0.6 }));
+  body.position.y = 0.475;
+  g.add(body);
+  const eyeMat = new THREE.MeshStandardMaterial({ color: 0x222222 });
+  for (const x of [-0.1, 0.1]) {
+    const eye = new THREE.Mesh(new THREE.SphereGeometry(0.045, 16, 12), eyeMat);
+    eye.position.set(x, 0.62, 0.28);   // +Z 쪽 = 앞
+    g.add(eye);
+  }
+  return g;
+}
+
+const A = makeCard(CONFIG.cardA, 'A');
+const B = makeCard(CONFIG.cardB, 'B');
+
+// ───────────────────────────────────────────────
+// 만남 연출: 선 + 하트
+// ───────────────────────────────────────────────
+const line = new THREE.Line(
+  new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(), new THREE.Vector3()]),
+  new THREE.LineBasicMaterial({ color: 0xffd84d }));
+line.frustumCulled = false;
+line.visible = false;
+scene.add(line);
+
+const heart = (() => {
+  const c = document.createElement('canvas');
+  c.width = c.height = 128;
+  const ctx = c.getContext('2d');
+  ctx.font = '100px sans-serif';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText('💛', 64, 70);
+  const s = new THREE.Sprite(new THREE.SpriteMaterial({ map: new THREE.CanvasTexture(c), depthTest: false }));
+  s.visible = false;
+  scene.add(s);
+  return s;
+})();
+
+function onMeet() {
+  console.log('[AR] 만남!');
+  line.visible = heart.visible = true;
+  greet(A);
+  greet(B);
+}
+
+function onPart() {
+  console.log('[AR] 헤어짐');
+  line.visible = heart.visible = false;
+}
+
+// GLB에 Greet 애니메이션이 있으면 재생, 없으면 두 번 통통
+function greet(card) {
+  const act = card.actions[CONFIG.greetClip];
+  if (act && card.mixer) {
+    card.idle?.fadeOut(0.2);
+    act.reset().setLoop(THREE.LoopOnce, 1).fadeIn(0.2).play();
+    const back = e => {
+      if (e.action !== act) return;
+      card.mixer.removeEventListener('finished', back);
+      act.fadeOut(0.2);
+      card.idle?.reset().fadeIn(0.2).play();
+    };
+    card.mixer.addEventListener('finished', back);
+  } else {
+    card.hopTime = 0;
+  }
+}
+
+// ───────────────────────────────────────────────
+// 매 프레임
+// ───────────────────────────────────────────────
+const clock = new THREE.Clock();
+const pA = new THREE.Vector3(), pB = new THREE.Vector3();
+const sA = new THREE.Vector3(), sB = new THREE.Vector3();
+const tmp = new THREE.Vector3(), up = new THREE.Vector3();
+const qA = new THREE.Quaternion();
+let met = false, hudTimer = 0;
+
+function update(dt) {
+  scene.updateMatrixWorld();
+  A.mixer?.update(dt);
+  B.mixer?.update(dt);
+
+  const both = A.visible && B.visible;
+  let dist = Infinity;
+
+  if (both) {
+    // 앵커의 스케일 = 그 카드의 가로폭이다.
+    // 위치를 각자의 폭으로 나누면 두 카드가 같은 단위(카드 폭)가 된다.
+    A.anchor.group.getWorldPosition(pA); A.anchor.group.getWorldScale(sA);
+    B.anchor.group.getWorldPosition(pB); B.anchor.group.getWorldScale(sB);
+    dist = tmp.copy(pA).divideScalar(sA.x).distanceTo(pB.clone().divideScalar(sB.x));
+    pB.multiplyScalar(sA.x / sB.x);   // B 위치를 A 단위로 환산 (방향·연출 계산용)
+  }
+
+  const near = both && dist < (met ? CONFIG.meetDistance + CONFIG.partMargin : CONFIG.meetDistance);
+
+  face(A, near ? pB : null, dt);
+  face(B, near ? pA.clone().multiplyScalar(sB.x / sA.x) : null, dt);
+  bounce(A, dt);
+  bounce(B, dt);
+
+  if (near) {
+    // 선: 두 캐릭터 가슴 높이를 잇는다
+    const a = A.hop.localToWorld(new THREE.Vector3(0, CONFIG.modelHeight * 0.5, 0));
+    const b = B.hop.localToWorld(new THREE.Vector3(0, CONFIG.modelHeight * 0.5, 0));
+    line.geometry.setFromPoints([a, b]);
+
+    // 하트: 두 카드 사이, 카드 위쪽으로 띄움
+    A.anchor.group.getWorldQuaternion(qA);
+    up.set(0, 0, 1).applyQuaternion(qA).multiplyScalar(sA.x * CONFIG.modelHeight * 1.4);
+    heart.position.copy(pA).add(pB).multiplyScalar(0.5).add(up);
+    const pulse = 1 + Math.sin(clock.elapsedTime * 6) * 0.1;
+    heart.scale.setScalar(sA.x * 0.35 * pulse);
+  }
+
+  if (near && !met) onMeet();
+  else if (!near && met) onPart();
+  met = near;
+
+  hudTimer += dt;
+  if (hudTimer > 0.15) {
+    hudTimer = 0;
+    hud.textContent =
+      `카드 A  ${A.visible ? '● 인식' : '○ 찾는 중'}${A.fallback ? ' (기본 도형)' : ''}\n` +
+      `카드 B  ${B.visible ? '● 인식' : '○ 찾는 중'}${B.fallback ? ' (기본 도형)' : ''}\n` +
+      `거리    ${both ? dist.toFixed(2) + ' (카드 폭)' : '-'}\n` +
+      `상태    ${met ? '💛 만남' : '헤어짐'}`;
+  }
+}
+
+// 상대가 있으면 그쪽을, 없으면 카드 정면(아래쪽 변)을 부드럽게 바라본다
+function face(card, otherWorldPos, dt) {
+  let target = 0;
+  if (otherWorldPos) {
+    const local = card.anchor.group.worldToLocal(otherWorldPos.clone());  // 카드 기준 좌표
+    target = Math.atan2(local.x, -local.y);
+  }
+  target += CONFIG.modelYawOffset;
+  const diff = Math.atan2(Math.sin(target - card.angle), Math.cos(target - card.angle));
+  card.angle += diff * (1 - Math.exp(-CONFIG.turnSpeed * dt));
+  card.yaw.rotation.y = card.angle;
+}
+
+function bounce(card, dt) {
+  if (card.hopTime < 0) return;
+  card.hopTime += dt;
+  const dur = 0.4, total = dur * 2;
+  if (card.hopTime >= total) { card.hopTime = -1; card.hop.position.y = 0; return; }
+  card.hop.position.y = Math.abs(Math.sin(card.hopTime / dur * Math.PI)) * CONFIG.modelHeight * 0.25;
+}
+
+// ───────────────────────────────────────────────
+// 시작
+// ───────────────────────────────────────────────
+document.querySelector('#startBtn').addEventListener('click', async () => {
+  document.querySelector('#start').remove();
+  try {
+    await mindarThree.start();
+    hud.hidden = false;
+    renderer.setAnimationLoop(() => {
+      update(Math.min(clock.getDelta(), 0.1));
+      renderer.render(scene, camera);
+    });
+  } catch (e) {
+    console.error(e);
+    hud.hidden = false;
+    hud.textContent = '카메라를 켤 수 없어요.\n· 주소가 https:// 인지 확인\n· 브라우저 카메라 권한 허용\n· targets.mind 파일 경로 확인';
+  }
+});
+</script>
+</body>
+</html>
